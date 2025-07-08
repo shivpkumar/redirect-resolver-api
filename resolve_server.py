@@ -1,58 +1,54 @@
 from flask import Flask, request, jsonify
-from bs4 import BeautifulSoup
 import requests
-import asyncio
-from playwright.async_api import async_playwright
+from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
-@app.route("/")
-def home():
-    return "Redirect Resolver is running!"
+def extract_final_url(html, original_url):
+    soup = BeautifulSoup(html, 'html.parser')
 
-@app.route("/resolve", methods=["GET"])
+    # Check common canonical markers
+    candidates = [
+        soup.find('meta', property='og:url'),
+        soup.find('meta', attrs={'name': 'twitter:url'}),
+        soup.find('link', rel='canonical')
+    ]
+
+    for tag in candidates:
+        if tag and tag.get('content'):
+            return tag['content']
+        if tag and tag.get('href'):
+            return tag['href']
+
+    return None  # fallback will be handled by caller
+
+@app.route('/resolve')
 def resolve():
-    url = request.args.get("url")
+    url = request.args.get('url')
     if not url:
-        return jsonify({"error": "Missing 'url' parameter"}), 400
+        return jsonify({'error': 'Missing url parameter'}), 400
 
-    resolved_url = asyncio.run(resolve_url(url))
-    if resolved_url:
-        return jsonify({"resolved_url": resolved_url})
-    else:
-        return jsonify({"error": "Could not resolve URL"}), 500
-
-async def resolve_url(url):
-    # Try simple HTML parsing first
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.5993.89 Safari/537.36"
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, "html.parser")
-            meta_refresh = soup.find("meta", attrs={"http-equiv": "refresh"})
-            if meta_refresh and "url=" in meta_refresh.get("content", ""):
-                redirect_url = meta_refresh["content"].split("url=")[-1]
-                app.logger.info(f"[HTML Resolver] Resolved via meta-refresh: {redirect_url}")
-                return redirect_url
-    except Exception as e:
-        app.logger.warning(f"[HTML Resolver] Failed: {e}")
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
 
-    # Fall back to Playwright for JS-based redirects
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context()
-            page = await context.new_page()
-            await page.goto(url, timeout=15000)
-            final_url = page.url
-            await browser.close()
-            app.logger.info(f"[Playwright Resolver] Resolved final URL: {final_url}")
-            return final_url
-    except Exception as e:
-        app.logger.error(f"[Playwright Resolver] Failed: {e}")
-        return None
+        final_url = extract_final_url(resp.text, url)
+        if final_url:
+            return jsonify({'resolved_url': final_url})
+        else:
+            return jsonify({
+                'error': 'Could not extract resolved URL from HTML',
+                'resolved_url': None,
+                'fallback': url
+            }), 502
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    except Exception as e:
+        return jsonify({'error': str(e), 'resolved_url': None}), 500
+
+@app.route('/')
+def home():
+    return 'Google News Redirect Resolver is running.'
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
