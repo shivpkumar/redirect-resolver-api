@@ -1,51 +1,45 @@
-import json
+import os
+import time
 import logging
 from flask import Flask, request, jsonify
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 @app.route("/")
-def health_check():
-    return "Redirect Resolver API is healthy"
+def index():
+    return "Redirect Resolver API is running"
 
 @app.route("/resolve")
 def resolve():
-    target_url = request.args.get("url")
-    if not target_url:
-        return jsonify({"error": "Missing 'url' parameter"}), 400
+    url = request.args.get("url")
+    if not url:
+        return jsonify({"error": "Missing 'url' query parameter"}), 400
 
-    # 🚩 Only support Google News wrapper URLs
-    if "news.google.com/rss/articles/" not in target_url:
-        return jsonify({"error": "Only Google News wrapper URLs are supported"}), 400
+    logger.info("[Resolver] Navigating to: %s", url)
 
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            logging.info(f"[Resolver] Navigating to: {target_url}")
-            page.goto(target_url, timeout=30000, wait_until="networkidle")
-            final_url = page.url
+            context = browser.new_context()
+            page = context.new_page()
+            page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            resolved_url = page.url
             browser.close()
 
-            # If we’re still on a Google News page, resolution failed
-            if "news.google.com" in final_url:
-                logging.warning("[Resolver] Failed to redirect away from Google News.")
-                return jsonify({
-                    "error": "Could not resolve article destination from Google News wrapper",
-                    "fallback": final_url,
-                    "resolved_url": None
-                }), 400
+        parsed = urlparse(resolved_url)
+        if not parsed.scheme.startswith("http"):
+            raise ValueError("Invalid scheme in resolved URL")
 
-            return jsonify({"resolved_url": final_url})
-
-    except PlaywrightTimeoutError:
-        return jsonify({"error": "Playwright timeout while resolving", "resolved_url": None}), 504
+        logger.info("[Resolver] Final resolved URL: %s", resolved_url)
+        return jsonify({"resolved_url": resolved_url})
 
     except Exception as e:
-        logging.exception("[Resolver] Unhandled exception")
-        return jsonify({"error": "Unexpected error", "details": str(e)}), 500
+        logger.exception("[Resolver] Exception: %s", str(e))
+        return jsonify({"error": "Failed to resolve redirect", "detail": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
