@@ -1,50 +1,48 @@
-import logging
+import re
+import time
 from flask import Flask, request, jsonify
-from playwright.async_api import async_playwright
-import asyncio
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
+from playwright.sync_api import sync_playwright
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
 
-@app.route("/resolve")
-def resolve():
-    url = request.args.get("url", "")
+@app.route("/resolve", methods=["GET"])
+def resolve_redirect():
+    url = request.args.get("url")
     if not url:
-        return jsonify({"error": "No URL provided"}), 400
+        return jsonify({"error": "Missing 'url' parameter"}), 400
 
     try:
-        resolved_url = asyncio.run(resolve_with_browser(url))
-        if resolved_url:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            print(f"[Resolver] Attempting to resolve: {url}")
+
+            # ✅ Use less strict waiting to reduce timeout errors
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+            time.sleep(2)  # brief pause for redirects/meta-refresh
+            content = page.content()
+            print("[Resolver] Page content preview:")
+            print(content[:1000])
+
+            # Try to extract canonical or final link
+            resolved_url = page.url
+            print(f"[Resolver] Final resolved URL: {resolved_url}")
+
+            browser.close()
+
             return jsonify({"resolved_url": resolved_url})
-        else:
-            return jsonify({"error": "Could not resolve URL"}), 400
     except Exception as e:
-        logging.exception(f"[Resolver] Exception during resolution: {e}")
-        return jsonify({"error": "Server error"}), 500
+        print(f"[Resolver] Exception: {e}")
+        return jsonify({"error": str(e)}), 500
 
-async def resolve_with_browser(url: str) -> str:
-    logging.info(f"[Resolver] Attempting to resolve: {url}")
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
-        page = await context.new_page()
 
-        try:
-            await page.goto(url, timeout=30000, wait_until="networkidle")
-        except Exception as e:
-            logging.warning(f"[Resolver] Timeout or navigation error: {e}")
-            await browser.close()
-            return None
+@app.route("/", methods=["GET"])
+def index():
+    return "Redirect Resolver API is running."
 
-        try:
-            final_url = page.url
-            logging.info(f"[Resolver] Final resolved URL: {final_url}")
-            return final_url
-        except Exception as e:
-            logging.error(f"[Resolver] Could not extract final URL: {e}")
-            return None
-        finally:
-            await browser.close()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
