@@ -1,48 +1,50 @@
-from flask import Flask, request, jsonify
-from playwright.sync_api import sync_playwright
 import logging
+from flask import Flask, request, jsonify
+from playwright.async_api import async_playwright
+import asyncio
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-@app.route("/resolve", methods=["GET"])
+@app.route("/resolve")
 def resolve():
-    target_url = request.args.get("url")
-
-    if not target_url:
-        return jsonify({"error": "Missing 'url' parameter"}), 400
-
-    logging.info(f"[Resolver] Attempting to resolve: {target_url}")
+    url = request.args.get("url", "")
+    if not url:
+        return jsonify({"error": "No URL provided"}), 400
 
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-
-            # Go to the wrapper URL
-            page.goto(target_url, timeout=10000)
-
-            # Wait 3 seconds for any dynamic JS to load
-            page.wait_for_timeout(3000)
-
-            # Capture page HTML for debug logging
-            html = page.content()
-            logging.info(f"[Resolver] Page content preview:\n{html[:500]}...\n")
-
-            # Capture the final URL (this may still be Google if no redirect occurred)
-            final_url = page.url
-            browser.close()
-
-            logging.info(f"[Resolver] Final resolved URL: {final_url}")
-
-            return jsonify({"resolved_url": final_url})
+        resolved_url = asyncio.run(resolve_with_browser(url))
+        if resolved_url:
+            return jsonify({"resolved_url": resolved_url})
+        else:
+            return jsonify({"error": "Could not resolve URL"}), 400
     except Exception as e:
-        logging.error(f"[Resolver] Exception: {e}")
-        return jsonify({"error": str(e), "resolved_url": target_url}), 500
+        logging.exception(f"[Resolver] Exception during resolution: {e}")
+        return jsonify({"error": "Server error"}), 500
 
-@app.route("/", methods=["GET"])
-def home():
-    return "✅ Link Resolver is running. Use /resolve?url=..."
+async def resolve_with_browser(url: str) -> str:
+    logging.info(f"[Resolver] Attempting to resolve: {url}")
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
+
+        try:
+            await page.goto(url, timeout=30000, wait_until="networkidle")
+        except Exception as e:
+            logging.warning(f"[Resolver] Timeout or navigation error: {e}")
+            await browser.close()
+            return None
+
+        try:
+            final_url = page.url
+            logging.info(f"[Resolver] Final resolved URL: {final_url}")
+            return final_url
+        except Exception as e:
+            logging.error(f"[Resolver] Could not extract final URL: {e}")
+            return None
+        finally:
+            await browser.close()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
