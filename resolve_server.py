@@ -1,66 +1,51 @@
+import json
+import logging
 from flask import Flask, request, jsonify
-import requests
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
 
-def extract_final_url(html, original_url):
-    soup = BeautifulSoup(html, 'html.parser')
+@app.route("/")
+def health_check():
+    return "Redirect Resolver API is healthy"
 
-    # Try canonical markers
-    candidates = [
-        soup.find('meta', property='og:url'),
-        soup.find('meta', attrs={'name': 'twitter:url'}),
-        soup.find('link', rel='canonical')
-    ]
-    for tag in candidates:
-        if tag and tag.get('content'):
-            return tag['content']
-        if tag and tag.get('href'):
-            return tag['href']
-
-    # Fallback: if <meta http-equiv="refresh"> exists, extract from there
-    refresh_tag = soup.find('meta', attrs={'http-equiv': 'refresh'})
-    if refresh_tag and 'url=' in refresh_tag.get('content', ''):
-        return refresh_tag['content'].split('url=')[-1].strip()
-
-    return None
-
-@app.route('/resolve')
+@app.route("/resolve")
 def resolve():
-    url = request.args.get('url')
-    if not url:
-        return jsonify({'error': 'Missing url parameter'}), 400
+    target_url = request.args.get("url")
+    if not target_url:
+        return jsonify({"error": "Missing 'url' parameter"}), 400
+
+    # 🚩 Only support Google News wrapper URLs
+    if "news.google.com/rss/articles/" not in target_url:
+        return jsonify({"error": "Only Google News wrapper URLs are supported"}), 400
 
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        session = requests.Session()
-        resp = session.get(url, headers=headers, timeout=10, allow_redirects=True)
-        resp.raise_for_status()
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            logging.info(f"[Resolver] Navigating to: {target_url}")
+            page.goto(target_url, timeout=30000, wait_until="networkidle")
+            final_url = page.url
+            browser.close()
 
-        # 1. Try meta tags from final response
-        final_url = extract_final_url(resp.text, url)
+            # If we’re still on a Google News page, resolution failed
+            if "news.google.com" in final_url:
+                logging.warning("[Resolver] Failed to redirect away from Google News.")
+                return jsonify({
+                    "error": "Could not resolve article destination from Google News wrapper",
+                    "fallback": final_url,
+                    "resolved_url": None
+                }), 400
 
-        # 2. Fallback: Use requests' final URL after redirects
-        if not final_url or "news.google.com" in final_url:
-            final_url = resp.url
+            return jsonify({"resolved_url": final_url})
 
-        # Still unresolved? Return error
-        if "news.google.com" in final_url:
-            return jsonify({
-                'error': 'Could not resolve article destination from Google News wrapper',
-                'resolved_url': None,
-                'fallback': resp.url
-            }), 502
-
-        return jsonify({'resolved_url': final_url})
+    except PlaywrightTimeoutError:
+        return jsonify({"error": "Playwright timeout while resolving", "resolved_url": None}), 504
 
     except Exception as e:
-        return jsonify({'error': str(e), 'resolved_url': None}), 500
+        logging.exception("[Resolver] Unhandled exception")
+        return jsonify({"error": "Unexpected error", "details": str(e)}), 500
 
-@app.route('/')
-def home():
-    return 'Google News Redirect Resolver is running.'
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
