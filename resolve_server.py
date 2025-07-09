@@ -5,7 +5,6 @@ from urllib.parse import urlparse
 
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 logging.basicConfig(
@@ -55,34 +54,36 @@ def resolve():
             else:
                 logger.warning("[Resolver] JS redirect not detected after 15s. Trying fallback strategies...")
 
-                html = page.content()
-                soup = BeautifulSoup(html, "html.parser")
-
-                # Fallback 1: Meta Refresh
-                meta = soup.find("meta", attrs={"http-equiv": re.compile("^refresh$", re.I)})
-                if meta and "content" in meta.attrs:
-                    match = re.search(r'url=(.+)', meta["content"], re.IGNORECASE)
-                    if match:
-                        redirect_url = match.group(1).strip()
-                        logger.info("[Resolver] 🔁 Found meta refresh URL: %s", redirect_url)
-                        page.goto(redirect_url, timeout=60000, wait_until="domcontentloaded")
-                        page.wait_for_timeout(5000)
-                        current_url = page.url
-                        logger.info("[Resolver] ✅ Meta refresh resolved to: %s", current_url)
+                # Fallback 1: Check meta refresh tag
+                meta = page.query_selector('meta[http-equiv="refresh"]')
+                if meta:
+                    content = meta.get_attribute("content")
+                    logger.info("[Resolver] Found meta refresh content: %s", content)
+                    if content:
+                        match = re.search(r'url=(.+)', content, re.IGNORECASE)
+                        if match:
+                            redirect_url = match.group(1).strip()
+                            logger.info("[Resolver] 🔁 Navigating to meta refresh URL: %s", redirect_url)
+                            page.goto(redirect_url, timeout=60000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(5000)
+                            current_url = page.url
+                            logger.info("[Resolver] ✅ Meta refresh resolved to: %s", current_url)
+                        else:
+                            logger.warning("[Resolver] Meta tag found but no valid URL detected")
                     else:
-                        logger.warning("[Resolver] Meta tag found but no valid URL detected")
+                        logger.warning("[Resolver] Meta tag had no content attribute")
                 else:
                     logger.info("[Resolver] No meta refresh tag found")
 
                 # Fallback 2: Anchor-based redirect
                 if is_google_news_url(current_url):
-                    links = soup.find_all("a", href=True)
+                    anchors = page.query_selector_all("a[href]")
                     found = False
-                    for link in links:
-                        if looks_like_article_url(link["href"]):
-                            redirect_url = link["href"]
-                            logger.info("[Resolver] 🔁 Found anchor fallback link: %s", redirect_url)
-                            page.goto(redirect_url, timeout=60000, wait_until="domcontentloaded")
+                    for anchor in anchors:
+                        href = anchor.get_attribute("href")
+                        if looks_like_article_url(href):
+                            logger.info("[Resolver] 🔁 Navigating to anchor fallback link: %s", href)
+                            page.goto(href, timeout=60000, wait_until="domcontentloaded")
                             page.wait_for_timeout(5000)
                             current_url = page.url
                             logger.info("[Resolver] ✅ Anchor fallback resolved to: %s", current_url)
